@@ -1,5 +1,6 @@
 #include "j3d.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -291,19 +292,176 @@ static bool addTri(MeshBuilder& b, const float* p, const float* uv, int16_t tex)
     return true;
 }
 
+// ---- joints / skinning matrices ---------------------------------------------------------------
+
+struct Mat {
+    float m[3][4];
+};
+
+static Mat matIdentity() {
+    Mat r;
+    memset(&r, 0, sizeof(r));
+    r.m[0][0] = r.m[1][1] = r.m[2][2] = 1.0f;
+    return r;
+}
+
+static Mat matMul(const Mat& a, const Mat& b) {  // a * b, both treated as 4x4 with a last row of 0 0 0 1
+    Mat r;
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 4; j++) {
+            r.m[i][j] = a.m[i][0] * b.m[0][j] + a.m[i][1] * b.m[1][j] + a.m[i][2] * b.m[2][j] + (j == 3 ? a.m[i][3] : 0.0f);
+        }
+    }
+    return r;
+}
+
+static float readF(const uint8_t* p) {
+    uint32_t b = sdfs_be32(p);
+    float f;
+    memcpy(&f, &b, 4);
+    return f;
+}
+
+// T * Rz * Ry * Rx * S
+static Mat matFromSRT(const float* s, const float* r, const float* t) {
+    float cx = cosf(r[0]), sx = sinf(r[0]), cy = cosf(r[1]), sy = sinf(r[1]), cz = cosf(r[2]), sz = sinf(r[2]);
+    float R[3][3] = {{cy * cz, sx * sy * cz - cx * sz, cx * sy * cz + sx * sz},
+                     {cy * sz, sx * sy * sz + cx * cz, cx * sy * sz - sx * cz},
+                     {-sy, sx * cy, cx * cy}};
+    Mat m;
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            m.m[i][j] = R[i][j] * s[j];
+        }
+        m.m[i][3] = t[i];
+    }
+    return m;
+}
+
+static const int kMaxJoints = 256;
+static const int kMaxDraw = 1024;
+
+// Walks INF1's scene graph and computes each joint's world matrix. Returns the number of joints (0 = no skeleton data).
+static uint32_t computeJoints(const uint8_t* inf, uint32_t infSize, const uint8_t* jnt, uint32_t jntSize, Mat* world) {
+    if (!inf || !jnt || infSize < 0x18 || jntSize < 0x18) {
+        return 0;
+    }
+    uint32_t count = sdfs_be16(jnt + 8);
+    if (count == 0 || count > (uint32_t)kMaxJoints) {
+        return 0;
+    }
+    uint32_t initOff = sdfs_be32(jnt + 0x0C), idxTab = sdfs_be32(jnt + 0x10);
+    for (uint32_t j = 0; j < count; j++) {
+        world[j] = matIdentity();
+    }
+    int stack[64];
+    int sp = 0;
+    int cur = -1;
+    uint32_t hier = sdfs_be32(inf + 0x14);
+    for (uint32_t p = hier; fits(infSize, p, 4); p += 4) {
+        uint32_t type = sdfs_be16(inf + p), val = sdfs_be16(inf + p + 2);
+        if (type == 0) break;
+        if (type == 0x10 && val < count) {
+            int parent = sp ? stack[sp - 1] : -1;
+            uint32_t ii = val;
+            if (fits(jntSize, idxTab + 2ull * val, 2)) ii = sdfs_be16(jnt + idxTab + 2 * val);
+            uint64_t ip = (uint64_t)initOff + (uint64_t)ii * 0x40;
+            Mat local = matIdentity();
+            if (fits(jntSize, ip, 0x40)) {
+                const uint8_t* q = jnt + ip;
+                float s[3] = {readF(q + 4), readF(q + 8), readF(q + 12)};
+                const float k = 3.14159265f / 32768.0f;
+                float r[3] = {(int16_t)sdfs_be16(q + 0x10) * k, (int16_t)sdfs_be16(q + 0x12) * k, (int16_t)sdfs_be16(q + 0x14) * k};
+                float t[3] = {readF(q + 0x18), readF(q + 0x1C), readF(q + 0x20)};
+                local = matFromSRT(s, r, t);
+            }
+            world[val] = (parent >= 0 && (uint32_t)parent < count) ? matMul(world[parent], local) : local;
+            cur = (int)val;
+        } else if (type == 1) {
+            if (sp < 64) stack[sp++] = cur;
+        } else if (type == 2) {
+            if (sp) sp--;
+        }
+    }
+    return count;
+}
+
+// Matrix for every DRW1 entry: a joint matrix, or a weighted blend of joints (EVP1) for skinned vertices.
+static uint32_t computeDrawMatrices(const uint8_t* drw, uint32_t drwSize, const uint8_t* evp, uint32_t evpSize,
+                                    const Mat* world, uint32_t jointCount, Mat* out) {
+    if (!drw || drwSize < 0x14) {
+        return 0;
+    }
+    uint32_t n = sdfs_be16(drw + 8);
+    if (n > (uint32_t)kMaxDraw) {
+        n = kMaxDraw;
+    }
+    uint32_t flagOff = sdfs_be32(drw + 0x0C), idxOff = sdfs_be32(drw + 0x10);
+    for (uint32_t i = 0; i < n; i++) {
+        out[i] = matIdentity();
+        if (!fits(drwSize, flagOff + i, 1) || !fits(drwSize, idxOff + 2ull * i, 2)) {
+            continue;
+        }
+        uint32_t flag = drw[flagOff + i];
+        uint32_t idx = sdfs_be16(drw + idxOff + 2 * i);
+        if (flag == 0) {
+            if (idx < jointCount) out[i] = world[idx];
+        } else if (evp && evpSize >= 0x1C && idx < sdfs_be16(evp + 8)) {
+            uint32_t numOff = sdfs_be32(evp + 0x0C), idxTab = sdfs_be32(evp + 0x10), wOff = sdfs_be32(evp + 0x14),
+                     invOff = sdfs_be32(evp + 0x18);
+            uint32_t first = 0;
+            for (uint32_t e = 0; e < idx; e++) {
+                if (!fits(evpSize, numOff + e, 1)) break;
+                first += evp[numOff + e];
+            }
+            if (!fits(evpSize, numOff + idx, 1)) continue;
+            uint32_t cnt = evp[numOff + idx];
+            Mat acc;
+            memset(&acc, 0, sizeof(acc));
+            bool any = false;
+            for (uint32_t k = 0; k < cnt; k++) {
+                if (!fits(evpSize, idxTab + 2ull * (first + k), 2) || !fits(evpSize, wOff + 4ull * (first + k), 4)) break;
+                uint32_t j = sdfs_be16(evp + idxTab + 2 * (first + k));
+                float w = readF(evp + wOff + 4 * (first + k));
+                if (j >= jointCount || !fits(evpSize, invOff + 48ull * (j + 1), 0)) continue;
+                if (!fits(evpSize, invOff + 48ull * j, 48)) continue;
+                Mat inv = matIdentity();
+                for (int r = 0; r < 3; r++)
+                    for (int c2 = 0; c2 < 4; c2++) inv.m[r][c2] = readF(evp + invOff + 48 * j + 16 * r + 4 * c2);
+                Mat blend = matMul(world[j], inv);
+                for (int r = 0; r < 3; r++)
+                    for (int c2 = 0; c2 < 4; c2++) acc.m[r][c2] += w * blend.m[r][c2];
+                any = true;
+            }
+            if (any) out[i] = acc;
+        }
+    }
+    return n;
+}
+
 struct ShapeCtx {
     ArrFmt pos, uv;
     bool hasUv;
     int16_t tex;
+    const Mat* draw;      // DRW1 matrices (may be null)
+    uint32_t drawCount;
 };
 
-static void emitTri(MeshBuilder& b, const ShapeCtx& s, const uint32_t* pi, const uint32_t* ti, uint32_t i0, uint32_t i1,
-                    uint32_t i2) {
+static void emitTri(MeshBuilder& b, const ShapeCtx& s, const uint32_t* pi, const uint32_t* ti, const uint32_t* pm,
+                    uint32_t i0, uint32_t i1, uint32_t i2) {
     uint32_t ids[3] = {i0, i1, i2};
     float p[9], uv[6] = {0, 0, 0, 0, 0, 0};
     for (int k = 0; k < 3; k++) {
         if (!readElem(s.pos, pi[ids[k]], p + k * 3)) {
             return;
+        }
+        uint32_t d = pm[ids[k]];
+        if (s.draw && d < s.drawCount) {
+            const Mat& M = s.draw[d];
+            float x = p[k * 3], y = p[k * 3 + 1], z = p[k * 3 + 2];
+            p[k * 3] = M.m[0][0] * x + M.m[0][1] * y + M.m[0][2] * z + M.m[0][3];
+            p[k * 3 + 1] = M.m[1][0] * x + M.m[1][1] * y + M.m[1][2] * z + M.m[1][3];
+            p[k * 3 + 2] = M.m[2][0] * x + M.m[2][1] * y + M.m[2][2] * z + M.m[2][3];
         }
         if (s.hasUv) {
             float t[3];
@@ -468,7 +626,8 @@ bool j3d_build_mesh(const uint8_t* d, size_t size, J3dMesh* out) {
         size = fileSize;
     }
     const uint8_t *inf = nullptr, *vtx = nullptr, *shp = nullptr, *mat = nullptr, *tex = nullptr;
-    uint32_t infSize = 0, vtxSize = 0, shpSize = 0, matSize = 0, texSize = 0;
+    const uint8_t *jnt = nullptr, *drw = nullptr, *evp = nullptr;
+    uint32_t infSize = 0, vtxSize = 0, shpSize = 0, matSize = 0, texSize = 0, jntSize = 0, drwSize = 0, evpSize = 0;
     uint32_t chunkCount = sdfs_be32(d + 0x0C);
     uint64_t off = 0x20;
     for (uint32_t i = 0; i < chunkCount; i++) {
@@ -485,6 +644,9 @@ bool j3d_build_mesh(const uint8_t* d, size_t size, J3dMesh* out) {
         else if (memcmp(c, "SHP1", 4) == 0) { shp = c; shpSize = csize; }
         else if (memcmp(c, "MAT3", 4) == 0) { mat = c; matSize = csize; }
         else if (memcmp(c, "TEX1", 4) == 0) { tex = c; texSize = csize; }
+        else if (memcmp(c, "JNT1", 4) == 0) { jnt = c; jntSize = csize; }
+        else if (memcmp(c, "DRW1", 4) == 0) { drw = c; drwSize = csize; }
+        else if (memcmp(c, "EVP1", 4) == 0) { evp = c; evpSize = csize; }
         off += csize;
     }
     if (!vtx || !shp || vtxSize < 0x4C || shpSize < 0x2C) {
@@ -496,6 +658,8 @@ bool j3d_build_mesh(const uint8_t* d, size_t size, J3dMesh* out) {
     sc.uv = readArray(vtx, vtxSize, 13, 5, 1, 2);  // TEX0 array is header slot 5 (0x0C + 4*5 = 0x20)
     sc.hasUv = sc.uv.valid;
     sc.tex = -1;
+    sc.draw = nullptr;
+    sc.drawCount = 0;
     if (!sc.pos.valid) {
         return false;
     }
@@ -505,13 +669,20 @@ bool j3d_build_mesh(const uint8_t* d, size_t size, J3dMesh* out) {
     uint32_t shapeOff = sdfs_be32(shp + 0x0C);
     uint32_t shapeIdxTab = sdfs_be32(shp + 0x10);
     int32_t* shapeTexIdx = (int32_t*)malloc(sizeof(int32_t) * (shapeCount + 1));  // TEX1 index per shape init entry
-    uint32_t* idx = (uint32_t*)malloc(2 * 65536 * sizeof(uint32_t));
+    uint32_t* idx = (uint32_t*)malloc(3 * 65536 * sizeof(uint32_t));
+    Mat* joints = (Mat*)malloc(sizeof(Mat) * (kMaxJoints + kMaxDraw));
     int16_t slotOf[256];
-    if (!shapeTexIdx || !idx) {
+    if (!shapeTexIdx || !idx || !joints) {
         free(shapeTexIdx);
         free(idx);
+        free(joints);
         return false;
     }
+    Mat* drawMtx = joints + kMaxJoints;
+    uint32_t jointCount = computeJoints(inf, infSize, jnt, jntSize, joints);
+    uint32_t drawCount = jointCount ? computeDrawMatrices(drw, drwSize, evp, evpSize, joints, jointCount, drawMtx) : 0;
+    sc.draw = drawCount ? drawMtx : nullptr;
+    sc.drawCount = drawCount;
     for (uint32_t s = 0; s <= shapeCount; s++) shapeTexIdx[s] = -1;
     for (int k = 0; k < 256; k++) slotOf[k] = -1;
 
@@ -553,6 +724,9 @@ bool j3d_build_mesh(const uint8_t* d, size_t size, J3dMesh* out) {
 
     uint32_t* pidx = idx;
     uint32_t* tidx = idx + 65536;
+    uint32_t* midx = idx + 2 * 65536;
+    uint32_t mtxTableOff = sdfs_be32(shp + 0x1C);
+    uint32_t mtxInitBase = sdfs_be32(shp + 0x24);
     uint32_t attrBase = sdfs_be32(shp + 0x18);
     uint32_t drawBase = sdfs_be32(shp + 0x20);
     uint32_t packBase = sdfs_be32(shp + 0x28);
@@ -569,7 +743,8 @@ bool j3d_build_mesh(const uint8_t* d, size_t size, J3dMesh* out) {
         uint32_t attrOff = sdfs_be16(shp + sp + 4);
         uint32_t firstGroup = sdfs_be16(shp + sp + 8);
 
-        uint32_t vertBytes = 0, posByte = 0, posKind = 0, uvByte = 0, uvKind = 0;
+        uint32_t vertBytes = 0, posByte = 0, posKind = 0, uvByte = 0, uvKind = 0, pnByte = 0;
+        bool hasPn = false;
         bool ok = true;
         for (uint64_t a = (uint64_t)attrBase + attrOff; fits(shpSize, a, 8); a += 8) {
             uint32_t attr = sdfs_be32(shp + a);
@@ -586,6 +761,10 @@ bool j3d_build_mesh(const uint8_t* d, size_t size, J3dMesh* out) {
                 sz = 2;
             } else if (kind != 0) {
                 ok = false;
+            }
+            if (attr == 0 && sz == 1) {
+                pnByte = vertBytes;
+                hasPn = true;
             }
             if (attr == 9 && sz) {
                 posByte = vertBytes;
@@ -625,7 +804,15 @@ bool j3d_build_mesh(const uint8_t* d, size_t size, J3dMesh* out) {
             cur.tex = slotOf[ti];
         }
 
+        uint32_t firstMtxInit = sdfs_be16(shp + sp + 6);
         for (uint32_t g = 0; g < groups; g++) {
+            // matrix group: which DRW1 entries this packet's PNMTXIDX values refer to
+            uint32_t useCount = 0, firstUse = 0;
+            uint64_t mi = (uint64_t)mtxInitBase + (uint64_t)(firstMtxInit + g) * 8;
+            if (mtxInitBase && fits(shpSize, mi, 8)) {
+                useCount = sdfs_be16(shp + mi + 2);
+                firstUse = sdfs_be32(shp + mi + 4);
+            }
             uint64_t pk = (uint64_t)packBase + (uint64_t)(firstGroup + g) * 8;
             if (!fits(shpSize, pk, 8)) {
                 break;
@@ -653,33 +840,39 @@ bool j3d_build_mesh(const uint8_t* d, size_t size, J3dMesh* out) {
                     if (cur.hasUv) {
                         tidx[v] = (uvKind == 3) ? sdfs_be16(vp + uvByte) : vp[uvByte];
                     }
+                    uint32_t slot = hasPn ? vp[pnByte] / 3 : 0;
+                    uint32_t drwIdx = 0xFFFF;
+                    if (slot < useCount && fits(shpSize, mtxTableOff + 2ull * (firstUse + slot), 2)) {
+                        drwIdx = sdfs_be16(shp + mtxTableOff + 2 * (firstUse + slot));
+                    }
+                    midx[v] = drwIdx;
                 }
                 pos += n * vertBytes;
 
                 switch (cmd & 0xF8) {
                     case 0x90:  // triangles
                         for (uint32_t i = 0; i + 2 < n; i += 3) {
-                            emitTri(mb, cur, pidx, tidx, i, i + 1, i + 2);
+                            emitTri(mb, cur, pidx, tidx, midx, i, i + 1, i + 2);
                         }
                         break;
                     case 0x98:  // triangle strip
                         for (uint32_t i = 0; i + 2 < n; i++) {
                             if (i & 1) {
-                                emitTri(mb, cur, pidx, tidx, i + 1, i, i + 2);
+                                emitTri(mb, cur, pidx, tidx, midx, i + 1, i, i + 2);
                             } else {
-                                emitTri(mb, cur, pidx, tidx, i, i + 1, i + 2);
+                                emitTri(mb, cur, pidx, tidx, midx, i, i + 1, i + 2);
                             }
                         }
                         break;
                     case 0xA0:  // triangle fan
                         for (uint32_t i = 1; i + 1 < n; i++) {
-                            emitTri(mb, cur, pidx, tidx, 0, i, i + 1);
+                            emitTri(mb, cur, pidx, tidx, midx, 0, i, i + 1);
                         }
                         break;
                     case 0x80:  // quads
                         for (uint32_t i = 0; i + 3 < n; i += 4) {
-                            emitTri(mb, cur, pidx, tidx, i, i + 1, i + 2);
-                            emitTri(mb, cur, pidx, tidx, i, i + 2, i + 3);
+                            emitTri(mb, cur, pidx, tidx, midx, i, i + 1, i + 2);
+                            emitTri(mb, cur, pidx, tidx, midx, i, i + 2, i + 3);
                         }
                         break;
                     default: break;
@@ -688,6 +881,7 @@ bool j3d_build_mesh(const uint8_t* d, size_t size, J3dMesh* out) {
         }
     }
     free(idx);
+    free(joints);
     free(shapeTexIdx);
     if (out->triCount == 0) {
         j3d_free_mesh(out);
