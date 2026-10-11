@@ -26,7 +26,7 @@ SRCS := \
 	$(ROOT)/src/JSystem/JMath/JMATrigonometric.cpp \
 	$(ROOT)/src/JSystem/JMath/random.cpp
 
-LOCAL_SRCS := source/main.cpp source/sdfs.cpp source/yaz0.cpp source/rarc.cpp source/j3d.cpp source/soft3d.cpp source/gpuview.cpp source/petari_test.cpp source/rvl_stubs.cpp
+LOCAL_SRCS := source/main.cpp source/sdfs.cpp source/yaz0.cpp source/rarc.cpp source/j3d.cpp source/soft3d.cpp source/gpumodel.cpp source/gpuview.cpp source/playground.cpp source/petari_test.cpp source/rvl_stubs.cpp
 
 INCLUDE := \
 	-I$(CTRULIB)/include \
@@ -53,7 +53,7 @@ OBJS := $(patsubst %.cpp,$(BUILD)/%.o,$(subst ../,up/,$(SRCS)) $(LOCAL_SRCS)) $(
 
 # main.cpp must NOT see the Petari/MSL headers (they shadow devkitARM libc headers and break <3ds.h>).
 PLAIN_CXXFLAGS := -MMD -MP -g -O2 -Wall $(ARCH) -mword-relocations -ffunction-sections -fdata-sections -D__3DS__ -I$(CTRULIB)/include -std=gnu++14
-$(BUILD)/source/main.o $(BUILD)/source/sdfs.o $(BUILD)/source/yaz0.o $(BUILD)/source/rarc.o $(BUILD)/source/j3d.o $(BUILD)/source/soft3d.o $(BUILD)/source/gpuview.o: CXXFLAGS := $(PLAIN_CXXFLAGS)
+$(BUILD)/source/main.o $(BUILD)/source/sdfs.o $(BUILD)/source/yaz0.o $(BUILD)/source/rarc.o $(BUILD)/source/j3d.o $(BUILD)/source/soft3d.o $(BUILD)/source/gpumodel.o $(BUILD)/source/gpuview.o $(BUILD)/source/playground.o: CXXFLAGS := $(PLAIN_CXXFLAGS)
 
 all: $(TARGET).3dsx
 

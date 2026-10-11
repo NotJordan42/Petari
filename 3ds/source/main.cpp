@@ -8,6 +8,7 @@
 #include "j3d.h"
 #include "soft3d.h"
 #include "gpuview.h"
+#include "playground.h"
 #include "rarc.h"
 #include "sdfs.h"
 #include "yaz0.h"
@@ -227,7 +228,7 @@ static void modelTest(int dir) {
         free(arc);
         if (shown) {
             printf("\n#%d of %d  [</>] other\n", idx + 1, total);
-            printf(g_haveMesh ? "[X] view 3D  [Y] GPU view  [A] next\n" : "(no drawable mesh)  [A] next page\n");
+            printf(g_haveMesh ? "[X] 3D [Y] GPU [SELECT] Mario world [A] next\n" : "(no drawable mesh)  [A] next page\n");
             return;
         }
     }
@@ -265,6 +266,87 @@ static void drawViewer(Soft3d& sf, float yaw, float pitch, float zoom) {
             p[2] = (c >> 16) & 0xFF;
         }
     }
+}
+
+static char lower(char c) {
+    return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+}
+
+static bool equalsNoCase(const char* a, const char* b) {
+    while (*a && *b) {
+        if (lower(*a++) != lower(*b++)) return false;
+    }
+    return *a == *b;
+}
+
+// Finds ObjectData/Mario.arc and decodes its biggest model (by triangle count) into *out.
+// Prints what it found on the bottom screen (the caller has selected it).
+static bool loadPlayer(J3dMesh* out) {
+    int total = sdfs_count("ObjectData");
+    char name[128];
+    char rel[200];
+    bool found = false;
+    for (int i = 0; i < total && !found; i++) {
+        if (sdfs_nth("ObjectData", i, name, sizeof(name)) && equalsNoCase(name, "Mario.arc")) {
+            snprintf(rel, sizeof(rel), "ObjectData/%s", name);
+            found = true;
+        }
+    }
+    if (!found) {
+        printf("ObjectData/Mario.arc not found.\nArchives starting with 'Mario':\n");
+        int shown = 0;
+        for (int i = 0; i < total && shown < 10; i++) {
+            if (sdfs_nth("ObjectData", i, name, sizeof(name)) && lower(name[0]) == 'm' && lower(name[1]) == 'a' &&
+                lower(name[2]) == 'r' && lower(name[3]) == 'i') {
+                printf(" %.36s\n", name);
+                shown++;
+            }
+        }
+        return false;
+    }
+    uint8_t* arc = nullptr;
+    size_t arcSize = 0;
+    if (!loadArchive(rel, &arc, &arcSize)) {
+        printf("could not read Mario.arc\n");
+        return false;
+    }
+    Rarc r;
+    bool ok = false;
+    char bestName[64] = "";
+    if (rarc_open(&r, arc, arcSize)) {
+        printf("Mario.arc models:\n");
+        for (uint32_t i = 0; i < r.nodeCount; i++) {
+            RarcNode n;
+            if (!rarc_node(r, i, &n) || n.isDir || !(endsWith(n.name, ".bdl") || endsWith(n.name, ".bmd"))) {
+                continue;
+            }
+            uint64_t off = (uint64_t)r.fileDataBase + n.dataOffset;
+            if (off + n.dataSize > arcSize) {
+                continue;
+            }
+            J3dMesh m;
+            if (!j3d_build_mesh(arc + off, n.dataSize, &m)) {
+                printf(" %.24s: no mesh\n", n.name);
+                continue;
+            }
+            printf(" %.24s: %lu tris\n", n.name, (unsigned long)m.triCount);
+            if (!ok || m.triCount > out->triCount) {
+                if (ok) j3d_free_mesh(out);
+                *out = m;
+                ok = true;
+                snprintf(bestName, sizeof(bestName), "%s", n.name);
+            } else {
+                j3d_free_mesh(&m);
+            }
+        }
+    }
+    free(arc);
+    if (ok) {
+        printf("using %s\n", bestName);
+    } else {
+        printf("no usable model\n");
+    }
+    return ok;
 }
 
 int main() {
@@ -309,6 +391,27 @@ int main() {
             gfxFlushBuffers();
             gfxSwapBuffers();
             gspWaitForVBlank();
+            continue;
+        }
+        if ((down & KEY_SELECT) && page == 2) {
+            consoleSelect(&bottom);
+            consoleClear();
+            printf("Loading Mario...\n");
+            J3dMesh player;
+            memset(&player, 0, sizeof(player));
+            const char* perr = loadPlayer(&player) ? nullptr : "player model not available";
+            if (!perr) {
+                printf("\nCircle pad: move   A: jump\nD-pad L/R: camera   L/R: zoom\nB: back\n");
+                perr = playground_run(player);
+                j3d_free_mesh(&player);
+            }
+            consoleInit(GFX_TOP, &top);
+            consoleSelect(&top);
+            printTop();
+            consoleSelect(&bottom);
+            if (perr) printf("\nMario world failed: %s\n", perr);
+            else printf("\nBack. Press A for the next page.\n");
+            consoleSelect(&top);
             continue;
         }
         if ((down & KEY_Y) && page == 2 && g_haveMesh) {
