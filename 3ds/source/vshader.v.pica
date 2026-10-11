@@ -38,9 +38,9 @@
 	dp3 r4, light, r3
 	mov r5, -r4
 	max r4, r4, r5
-	mul r4, r4, k.yyyy
-	add r4, r4, k.xxxx
-	mul outclr, r4, base
+	mul r4, k.yyyy, r4
+	add r4, k.xxxx, r4
+	mul outclr, base, r4
 
 	end
 .end
