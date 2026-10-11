@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "j3d.h"
+#include "soft3d.h"
 #include "rarc.h"
 #include "sdfs.h"
 #include "yaz0.h"
@@ -158,7 +159,9 @@ static bool loadArchive(const char* rel, uint8_t** outBuf, size_t* outSize) {
     return true;
 }
 
-static int g_modelIdx = -1;  // index into ObjectData of the archive currently shown
+static int g_modelIdx = -1;
+static J3dMesh g_mesh;  // mesh of the model currently shown (triCount 0 = none)
+static bool g_haveMesh = false;  // index into ObjectData of the archive currently shown
 
 // Bottom screen page 3: find a model (.bdl/.bmd) in an ObjectData archive and print what is inside it.
 // dir = +1 shows the next archive that has a model, -1 the previous one.
@@ -201,6 +204,10 @@ static void modelTest(int dir) {
                 }
                 g_modelIdx = idx;
                 shown = true;
+                if (g_haveMesh) {
+                    j3d_free_mesh(&g_mesh);
+                }
+                g_haveMesh = j3d_build_mesh(arc + off, n.dataSize, &g_mesh);
                 printf("%.38s\n", name);
                 printf("%.30s  %lu bytes\n", n.name, (unsigned long)n.dataSize);
                 printf("type %s, %lu chunks\n\n", info.type, (unsigned long)info.chunkCount);
@@ -218,22 +225,15 @@ static void modelTest(int dir) {
         }
         free(arc);
         if (shown) {
-            printf("\n#%d of %d  [</>] other  [A] next page\n", idx + 1, total);
+            printf("\n#%d of %d  [</>] other\n", idx + 1, total);
+            printf(g_haveMesh ? "[X] view in 3D  [A] next page\n" : "(no drawable mesh)  [A] next page\n");
             return;
         }
     }
     printf("No model found\n\n[A] next page\n");
 }
 
-int main() {
-    gfxInitDefault();
-    PrintConsole top, bottom;
-    consoleInit(GFX_TOP, &top);
-    consoleInit(GFX_BOTTOM, &bottom);
-    consoleSelect(&bottom);
-    sdTest();
-    consoleSelect(&top);
-
+static void printTop() {
     float r[32];
     petari_run_tests(r);
 
@@ -247,13 +247,72 @@ int main() {
     row("ApplyScale", r + 13, 3, "10.000 15.000 20.000");
 
     printf("\nPress START to exit.\n");
+}
+
+// Draws the current mesh to the top screen framebuffer with the software renderer (400x240, BGR8, rotated 90 degrees).
+static void drawViewer(Soft3d& sf, float yaw, float pitch, float zoom) {
+    soft3d_clear(&sf, 0x101828);
+    soft3d_draw_mesh(&sf, g_mesh, yaw, pitch, zoom);
+    u16 fw, fh;
+    u8* fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &fw, &fh);
+    for (int y = 0; y < 240; y++) {
+        for (int x = 0; x < 400; x++) {
+            uint32_t c = sf.color[y * 400 + x];
+            u8* p = fb + ((size_t)x * 240 + (239 - y)) * 3;
+            p[0] = c & 0xFF;
+            p[1] = (c >> 8) & 0xFF;
+            p[2] = (c >> 16) & 0xFF;
+        }
+    }
+}
+
+int main() {
+    gfxInitDefault();
+    PrintConsole top, bottom;
+    consoleInit(GFX_TOP, &top);
+    consoleInit(GFX_BOTTOM, &bottom);
+    consoleSelect(&bottom);
+    sdTest();
+    consoleSelect(&top);
+
+    printTop();
+
 
     int page = 0;
+    bool viewing = false;
+    Soft3d sf;
+    bool sfOk = soft3d_init(&sf, 400, 240);
+    float yaw = 0, pitch = 0.3f, zoom = 1.0f;
     while (aptMainLoop()) {
         hidScanInput();
         u32 down = hidKeysDown();
         if (down & KEY_START) {
             break;
+        }
+        if (viewing) {
+            u32 held = hidKeysHeld();
+            if (down & KEY_B) {
+                viewing = false;
+                consoleSelect(&top);
+                consoleClear();
+                printTop();
+            } else {
+                if (held & KEY_DLEFT) yaw -= 0.05f; else if (held & KEY_DRIGHT) yaw += 0.05f; else yaw += 0.015f;
+                if (held & KEY_DUP) pitch += 0.04f;
+                if (held & KEY_DDOWN) pitch -= 0.04f;
+                if (held & KEY_R) zoom *= 1.03f;
+                if (held & KEY_L) zoom /= 1.03f;
+                drawViewer(sf, yaw, pitch, zoom);
+            }
+            gfxFlushBuffers();
+            gfxSwapBuffers();
+            gspWaitForVBlank();
+            continue;
+        }
+        if ((down & KEY_X) && page == 2 && g_haveMesh && sfOk) {
+            viewing = true;
+            yaw = 0; pitch = 0.3f; zoom = 1.0f;
+            continue;
         }
         int modelDir = 0;
         if ((down & KEY_DRIGHT) && page == 2) {
@@ -281,6 +340,8 @@ int main() {
         gspWaitForVBlank();
     }
 
+    if (g_haveMesh) j3d_free_mesh(&g_mesh);
+    if (sfOk) soft3d_free(&sf);
     gfxExit();
     return 0;
 }

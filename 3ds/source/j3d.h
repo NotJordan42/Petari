@@ -22,3 +22,16 @@ struct J3dInfo {
 
 // Returns false if data is not a J3D file. Safe on truncated or corrupt input (every offset is bounds-checked).
 bool j3d_inspect(const uint8_t* data, size_t size, J3dInfo* out);
+
+// A decoded model: a plain triangle list (3 vertices x xyz floats per triangle), ready for any renderer.
+// Static geometry only for now: joint/skinning matrices are not applied, so multi-joint models can look pulled apart.
+struct J3dMesh {
+    float* tris;        // triCount * 9 floats
+    uint32_t triCount;
+    float minv[3];
+    float maxv[3];
+};
+
+// Decodes positions + display lists into a triangle list. Returns false if there is nothing drawable.
+bool j3d_build_mesh(const uint8_t* data, size_t size, J3dMesh* out);
+void j3d_free_mesh(J3dMesh* m);
