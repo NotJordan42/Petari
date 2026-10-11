@@ -293,6 +293,7 @@ int main() {
             u32 held = hidKeysHeld();
             if (down & KEY_B) {
                 viewing = false;
+                gfxSetScreenFormat(GFX_TOP, GSP_RGB565_OES);  // the text console needs its 16-bit format back
                 consoleSelect(&top);
                 consoleClear();
                 printTop();
@@ -311,6 +312,7 @@ int main() {
         }
         if ((down & KEY_X) && page == 2 && g_haveMesh && sfOk) {
             viewing = true;
+            gfxSetScreenFormat(GFX_TOP, GSP_BGR8_OES);  // the console switched the screen to 16-bit; the viewer writes 24-bit
             yaw = 0; pitch = 0.3f; zoom = 1.0f;
             continue;
         }
