@@ -23,15 +23,26 @@ struct J3dInfo {
 // Returns false if data is not a J3D file. Safe on truncated or corrupt input (every offset is bounds-checked).
 bool j3d_inspect(const uint8_t* data, size_t size, J3dInfo* out);
 
-// A decoded model: a plain triangle list (3 vertices x xyz floats per triangle), ready for any renderer.
-// Static geometry only for now: joint/skinning matrices are not applied, so multi-joint models can look pulled apart.
+// A decoded texture, RGBA8 packed as 0xRRGGBBAA, row-major, first row = top of the image.
+struct J3dTexture {
+    uint16_t w, h;
+    uint8_t wrapS, wrapT;  // 0 clamp, 1 repeat, 2 mirror
+    uint32_t* rgba;
+};
+
+// A decoded model: a plain triangle list. Static geometry only for now: joint/skinning matrices are not applied,
+// so multi-joint models can look pulled apart.
 struct J3dMesh {
-    float* tris;        // triCount * 9 floats
+    float* tris;        // triCount * 9 floats (3 vertices x xyz)
+    float* uvs;         // triCount * 6 floats (3 vertices x st), GX convention (t = 0 at the top of the image)
+    int16_t* triTex;    // triCount entries: index into textures[], or -1 for none
     uint32_t triCount;
     float minv[3];
     float maxv[3];
+    J3dTexture* textures;  // only textures actually used by some shape
+    uint32_t texCount;
 };
 
-// Decodes positions + display lists into a triangle list. Returns false if there is nothing drawable.
+// Decodes positions, texture coordinates, display lists and the textures they use. False if nothing is drawable.
 bool j3d_build_mesh(const uint8_t* data, size_t size, J3dMesh* out);
 void j3d_free_mesh(J3dMesh* m);

@@ -1,18 +1,20 @@
 ; Vertex shader for the model viewer: transforms the position and does simple two-sided lighting.
-; Attributes: v0 = position (xyz), v1 = normal (xyz, model space). Uniforms: projection, modelview.
+; Attributes: v0 = position (xyz), v1 = normal (xyz, model space), v2 = texture coordinate (st). Uniforms: projection, modelview, tint (colour multiplier).
 
 .fvec projection[4]
 .fvec modelview[4]
+.fvec tint
 
 .constf k(0.25, 0.75, 1.0, 0.0)
 .constf light(0.3522, 0.5535, 0.7547, 0.0)
-.constf base(0.59, 0.75, 1.0, 1.0)
 
 .out outpos position
 .out outclr color
+.out outtc0 texcoord0
 
 .in inpos v0
 .in innrm v1
+.in intc v2
 
 .proc main
 	; position
@@ -40,7 +42,9 @@
 	max r4, r4, r5
 	mul r4, k.yyyy, r4
 	add r4, k.xxxx, r4
-	mul outclr, base, r4
+	mul outclr, tint, r4
+	mov outclr.w, k.zzzz
+	mov outtc0, intc
 
 	end
 .end

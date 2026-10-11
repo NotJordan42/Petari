@@ -17,7 +17,29 @@ extern const u32 vshader_shbin_size;
 struct Vtx {
     float x, y, z;
     float nx, ny, nz;
+    float u, v;
 };
+
+// Converts a row-major RGBA image into the PICA200's layout: 8x8 tiles, Morton order inside each tile.
+static void swizzle(const uint32_t* src, int w, int h, uint32_t* dst) {
+    int tilesX = w / 8;
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            int tile = (y >> 3) * tilesX + (x >> 3);
+            int xi = x & 7, yi = y & 7;
+            int m = (xi & 1) | ((yi & 1) << 1) | ((xi & 2) << 1) | ((yi & 2) << 2) | ((xi & 4) << 2) | ((yi & 4) << 3);
+            dst[tile * 64 + m] = src[y * w + x];
+        }
+    }
+}
+
+static GPU_TEXTURE_WRAP_PARAM wrapMode(uint8_t w) {
+    return w == 0 ? GPU_CLAMP_TO_EDGE : (w == 2 ? GPU_MIRRORED_REPEAT : GPU_REPEAT);
+}
+
+static bool pow2(int v) {
+    return v >= 8 && v <= 1024 && (v & (v - 1)) == 0;
+}
 
 const char* gpuview_run(const J3dMesh& mesh) {
     if (!mesh.triCount) {
@@ -29,6 +51,23 @@ const char* gpuview_run(const J3dMesh& mesh) {
         return "out of linear memory";
     }
 
+    // Triangles are grouped by texture so each group is one draw call. Group 0 = untextured, group k+1 = texture k.
+    uint32_t groups = mesh.texCount + 1;
+    uint32_t groupStart[34] = {0};
+    if (groups > 33) {
+        groups = 33;
+    }
+    uint32_t groupCount[34] = {0};
+    for (uint32_t t = 0; t < mesh.triCount; t++) {
+        int g = mesh.triTex[t] + 1;
+        if (g < 0 || (uint32_t)g >= groups) g = 0;
+        groupCount[g]++;
+    }
+    for (uint32_t k = 1; k <= groups; k++) {
+        groupStart[k] = groupStart[k - 1] + groupCount[k - 1];
+    }
+    uint32_t fill[34] = {0};
+
     // Centre the model on the origin and scale it to a radius of 1, with a flat normal per triangle.
     float cx = 0.5f * (mesh.minv[0] + mesh.maxv[0]);
     float cy = 0.5f * (mesh.minv[1] + mesh.maxv[1]);
@@ -38,11 +77,16 @@ const char* gpuview_run(const J3dMesh& mesh) {
     float inv = radius > 1e-6f ? 1.0f / radius : 1.0f;
     for (uint32_t t = 0; t < mesh.triCount; t++) {
         const float* v = mesh.tris + (size_t)t * 9;
-        Vtx* o = vbo + (size_t)t * 3;
+        const float* uv = mesh.uvs + (size_t)t * 6;
+        int g = mesh.triTex[t] + 1;
+        if (g < 0 || (uint32_t)g >= groups) g = 0;
+        Vtx* o = vbo + (size_t)(groupStart[g] + fill[g]++) * 3;
         for (int i = 0; i < 3; i++) {
             o[i].x = (v[i * 3] - cx) * inv;
             o[i].y = (v[i * 3 + 1] - cy) * inv;
             o[i].z = (v[i * 3 + 2] - cz) * inv;
+            o[i].u = uv[i * 2];
+            o[i].v = uv[i * 2 + 1];
         }
         float ax = o[1].x - o[0].x, ay = o[1].y - o[0].y, az = o[1].z - o[0].z;
         float bx = o[2].x - o[0].x, by = o[2].y - o[0].y, bz = o[2].z - o[0].z;
@@ -89,21 +133,42 @@ const char* gpuview_run(const J3dMesh& mesh) {
 
     int locProj = shaderInstanceGetUniformLocation(prog.vertexShader, "projection");
     int locMv = shaderInstanceGetUniformLocation(prog.vertexShader, "modelview");
+    int locTint = shaderInstanceGetUniformLocation(prog.vertexShader, "tint");
 
     C3D_AttrInfo* ai = C3D_GetAttrInfo();
     AttrInfo_Init(ai);
     AttrInfo_AddLoader(ai, 0, GPU_FLOAT, 3);
     AttrInfo_AddLoader(ai, 1, GPU_FLOAT, 3);
+    AttrInfo_AddLoader(ai, 2, GPU_FLOAT, 2);
 
     C3D_BufInfo* bi = C3D_GetBufInfo();
     BufInfo_Init(bi);
-    BufInfo_Add(bi, vbo, sizeof(Vtx), 2, 0x10);
+    BufInfo_Add(bi, vbo, sizeof(Vtx), 3, 0x210);
 
-    C3D_TexEnv* env = C3D_GetTexEnv(0);
-    C3D_TexEnvInit(env);
-    C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
-    C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
     C3D_CullFace(GPU_CULL_NONE);
+    C3D_AlphaTest(true, GPU_GREATER, 0x20);  // cut out fully transparent texels
+
+    // Upload textures. Anything that isn't a power of two between 8 and 1024 draws untextured.
+    C3D_Tex tex[32];
+    bool texOk[32] = {false};
+    for (uint32_t k = 0; k < mesh.texCount && k < 32; k++) {
+        const J3dTexture& jt = mesh.textures[k];
+        if (!pow2(jt.w) || !pow2(jt.h)) {
+            continue;
+        }
+        uint32_t* tiled = (uint32_t*)malloc((size_t)jt.w * jt.h * 4);
+        if (!tiled) {
+            continue;
+        }
+        swizzle(jt.rgba, jt.w, jt.h, tiled);
+        if (C3D_TexInit(&tex[k], jt.w, jt.h, GPU_RGBA8)) {
+            C3D_TexLoadImage(&tex[k], tiled, GPU_TEXFACE_2D, 0);
+            C3D_TexSetFilter(&tex[k], GPU_LINEAR, GPU_LINEAR);
+            C3D_TexSetWrap(&tex[k], wrapMode(jt.wrapS), wrapMode(jt.wrapT));
+            texOk[k] = true;
+        }
+        free(tiled);
+    }
 
     C3D_Mtx proj;
     Mtx_PerspTilt(&proj, C3D_AngleFromDegrees(40.0f), C3D_AspectRatioTop, 0.1f, 100.0f, false);
@@ -133,10 +198,30 @@ const char* gpuview_run(const J3dMesh& mesh) {
         C3D_FrameDrawOn(tgt);
         C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, locProj, &proj);
         C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, locMv, &mv);
-        C3D_DrawArrays(GPU_TRIANGLES, 0, (int)vcount);
+        for (uint32_t k = 0; k < groups; k++) {
+            if (!groupCount[k]) {
+                continue;
+            }
+            C3D_TexEnv* env = C3D_GetTexEnv(0);
+            C3D_TexEnvInit(env);
+            if (k > 0 && texOk[k - 1]) {
+                C3D_TexBind(0, &tex[k - 1]);
+                C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0);
+                C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE);
+                C3D_FVUnifSet(GPU_VERTEX_SHADER, locTint, 1.0f, 1.0f, 1.0f, 1.0f);
+            } else {
+                C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
+                C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+                C3D_FVUnifSet(GPU_VERTEX_SHADER, locTint, 0.59f, 0.75f, 1.0f, 1.0f);
+            }
+            C3D_DrawArrays(GPU_TRIANGLES, (int)(groupStart[k] * 3), (int)(groupCount[k] * 3));
+        }
         C3D_FrameEnd(0);
     }
 
+    for (uint32_t k = 0; k < mesh.texCount && k < 32; k++) {
+        if (texOk[k]) C3D_TexDelete(&tex[k]);
+    }
     shaderProgramFree(&prog);
     DVLB_Free(dvlb);
     C3D_RenderTargetDelete(tgt);
