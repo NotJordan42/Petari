@@ -146,7 +146,7 @@ const char* gpuview_run(const J3dMesh& mesh) {
     BufInfo_Add(bi, vbo, sizeof(Vtx), 3, 0x210);
 
     C3D_CullFace(GPU_CULL_NONE);
-    C3D_AlphaTest(true, GPU_GREATER, 0x20);  // cut out fully transparent texels
+    C3D_AlphaTest(true, GPU_GREATER, 0x08);  // skip fully transparent texels
 
     // Upload textures. Anything that isn't a power of two between 8 and 1024 draws untextured.
     C3D_Tex tex[32];
@@ -205,11 +205,17 @@ const char* gpuview_run(const J3dMesh& mesh) {
             C3D_TexEnv* env = C3D_GetTexEnv(0);
             C3D_TexEnvInit(env);
             if (k > 0 && texOk[k - 1]) {
+                // textured groups are alpha blended and don't write depth, so see-through parts don't hide what is behind
+                C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_SRC_ALPHA,
+                               GPU_ONE_MINUS_SRC_ALPHA);
+                C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_COLOR);
                 C3D_TexBind(0, &tex[k - 1]);
                 C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0);
                 C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE);
                 C3D_FVUnifSet(GPU_VERTEX_SHADER, locTint, 1.0f, 1.0f, 1.0f, 1.0f);
             } else {
+                C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+                C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
                 C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, (GPU_TEVSRC)0, (GPU_TEVSRC)0);
                 C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
                 C3D_FVUnifSet(GPU_VERTEX_SHADER, locTint, 0.59f, 0.75f, 1.0f, 1.0f);
