@@ -105,3 +105,26 @@ uint8_t* sdfs_read_all(const char* rel, size_t* outSize) {
     *outSize = (size_t)len;
     return buf;
 }
+
+bool sdfs_nth(const char* relDir, int index, char* outName, size_t outN) {
+    char path[256];
+    joinPath(path, sizeof(path), kRoot, relDir);
+    DIR* d = opendir(path);
+    if (!d) {
+        return false;
+    }
+    bool found = false;
+    int i = 0;
+    while (dirent* e = readdir(d)) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) {
+            continue;
+        }
+        if (i++ == index) {
+            snprintf(outName, outN, "%s", e->d_name);
+            found = true;
+            break;
+        }
+    }
+    closedir(d);
+    return found;
+}

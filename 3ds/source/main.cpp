@@ -3,7 +3,9 @@
 #include <3ds.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
+#include "j3d.h"
 #include "rarc.h"
 #include "sdfs.h"
 #include "yaz0.h"
@@ -55,7 +57,7 @@ static void sdTest() {
     } else {
         printf("\nNo file found in StageData\n");
     }
-    printf("\n[A] open the archive\n");
+    printf("\n[A] next page\n");
 }
 
 // Bottom screen page 2: decompress that first StageData archive and list what is inside it.
@@ -64,7 +66,7 @@ static void archiveTest() {
     long fileSize = 0;
     printf("Archive test\n\n");
     if (!sdfs_find_first_file("StageData", rel, sizeof(rel), &fileSize)) {
-        printf("No StageData file found\n\n[A] back\n");
+        printf("No StageData file found\n\n[A] next page\n");
         return;
     }
     printf("%.38s\n", rel);
@@ -72,7 +74,7 @@ static void archiveTest() {
     size_t rawSize = 0;
     uint8_t* raw = sdfs_read_all(rel, &rawSize);
     if (!raw) {
-        printf("Could not read the file\n\n[A] back\n");
+        printf("Could not read the file\n\n[A] next page\n");
         return;
     }
 
@@ -82,7 +84,7 @@ static void archiveTest() {
     if (unpacked) {
         arc = (uint8_t*)malloc(unpacked);
         if (!arc || !yaz0_decode(raw, rawSize, arc, unpacked)) {
-            printf("Yaz0 decode FAILED\n\n[A] back\n");
+            printf("Yaz0 decode FAILED\n\n[A] next page\n");
             free(arc);
             free(raw);
             return;
@@ -118,12 +120,109 @@ static void archiveTest() {
         printf("RARC header check FAILED\n");
         printf("first bytes: %02X %02X %02X %02X\n", arc[0], arc[1], arc[2], arc[3]);
     }
-    printf("\n[A] back\n");
+    printf("\n[A] next page\n");
 
     if (arc != raw) {
         free(arc);
     }
     free(raw);
+}
+
+static bool endsWith(const char* s, const char* suffix) {
+    size_t a = strlen(s), b = strlen(suffix);
+    return a >= b && strcmp(s + a - b, suffix) == 0;
+}
+
+// Loads an archive from the game folder (decompressing Yaz0 if needed). Caller free()s *outBuf.
+static bool loadArchive(const char* rel, uint8_t** outBuf, size_t* outSize) {
+    size_t rawSize = 0;
+    uint8_t* raw = sdfs_read_all(rel, &rawSize);
+    if (!raw) {
+        return false;
+    }
+    uint32_t unpacked = yaz0_size(raw, rawSize);
+    if (!unpacked) {
+        *outBuf = raw;
+        *outSize = rawSize;
+        return true;
+    }
+    uint8_t* arc = (uint8_t*)malloc(unpacked);
+    bool ok = arc && yaz0_decode(raw, rawSize, arc, unpacked);
+    free(raw);
+    if (!ok) {
+        free(arc);
+        return false;
+    }
+    *outBuf = arc;
+    *outSize = unpacked;
+    return true;
+}
+
+static int g_modelIdx = -1;  // index into ObjectData of the archive currently shown
+
+// Bottom screen page 3: find a model (.bdl/.bmd) in an ObjectData archive and print what is inside it.
+// dir = +1 shows the next archive that has a model, -1 the previous one.
+static void modelTest(int dir) {
+    printf("Model inspector\n\n");
+    int total = sdfs_count("ObjectData");
+    if (total <= 0) {
+        printf("No ObjectData folder\n\n[A] next page\n");
+        return;
+    }
+    int idx = g_modelIdx;
+    for (int tried = 0; tried < total; tried++) {
+        idx = (idx + dir + total) % total;
+        char name[128];
+        if (!sdfs_nth("ObjectData", idx, name, sizeof(name)) || !endsWith(name, ".arc")) {
+            continue;
+        }
+        char rel[200];
+        snprintf(rel, sizeof(rel), "ObjectData/%s", name);
+        uint8_t* arc = nullptr;
+        size_t arcSize = 0;
+        if (!loadArchive(rel, &arc, &arcSize)) {
+            continue;
+        }
+        Rarc r;
+        bool shown = false;
+        if (rarc_open(&r, arc, arcSize)) {
+            for (uint32_t i = 0; i < r.nodeCount && !shown; i++) {
+                RarcNode n;
+                if (!rarc_node(r, i, &n) || n.isDir || !(endsWith(n.name, ".bdl") || endsWith(n.name, ".bmd"))) {
+                    continue;
+                }
+                uint64_t off = (uint64_t)r.fileDataBase + n.dataOffset;
+                if (off + n.dataSize > arcSize) {
+                    continue;
+                }
+                J3dInfo info;
+                if (!j3d_inspect(arc + off, n.dataSize, &info)) {
+                    continue;
+                }
+                g_modelIdx = idx;
+                shown = true;
+                printf("%.38s\n", name);
+                printf("%.30s  %lu bytes\n", n.name, (unsigned long)n.dataSize);
+                printf("type %s, %lu chunks\n\n", info.type, (unsigned long)info.chunkCount);
+                printf("vertices ~%lu (%s%lu)\n", (unsigned long)info.posCount, info.posType == 4 ? "float x" : "int x",
+                       (unsigned long)info.posComps);
+                printf("shapes    %lu\n", (unsigned long)info.shapeCount);
+                printf("packets   %lu\n", (unsigned long)info.packets);
+                printf("triangles %lu\n", (unsigned long)info.triangles);
+                printf("materials %lu\n", (unsigned long)info.materialCount);
+                printf("textures  %lu\n", (unsigned long)info.textureCount);
+                if (info.unsupportedAttr) {
+                    printf("(some shapes use a layout I\n can't read yet)\n");
+                }
+            }
+        }
+        free(arc);
+        if (shown) {
+            printf("\n#%d of %d  [</>] other  [A] next page\n", idx + 1, total);
+            return;
+        }
+    }
+    printf("No model found\n\n[A] next page\n");
 }
 
 int main() {
@@ -156,12 +255,22 @@ int main() {
         if (down & KEY_START) {
             break;
         }
-        if (down & KEY_A) {
-            page ^= 1;
+        int modelDir = 0;
+        if ((down & KEY_DRIGHT) && page == 2) {
+            modelDir = 1;
+        } else if ((down & KEY_DLEFT) && page == 2) {
+            modelDir = -1;
+        }
+        if ((down & KEY_A) || modelDir) {
+            if (down & KEY_A) {
+                page = (page + 1) % 3;
+            }
             consoleSelect(&bottom);
             consoleClear();
-            if (page) {
+            if (page == 1) {
                 archiveTest();
+            } else if (page == 2) {
+                modelTest(modelDir ? modelDir : 1);
             } else {
                 sdTest();
             }

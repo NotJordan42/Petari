@@ -7,6 +7,9 @@
 // Number of entries in a directory under the game root (e.g. "StageData"), or -1 if it can't be opened.
 int sdfs_count(const char* relDir);
 
+// Name of the index-th entry (0-based, skipping . and ..) of a game directory. Returns false if out of range.
+bool sdfs_nth(const char* relDir, int index, char* outName, size_t outN);
+
 // Finds the first regular file under relDir (descends up to 3 levels). outRel is relative to the game root.
 bool sdfs_find_first_file(const char* relDir, char* outRel, size_t outN, long* outSize);
 
