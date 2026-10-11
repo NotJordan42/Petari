@@ -42,7 +42,7 @@ INCLUDE := \
 
 # New 3DS = ARM11 MPCore (armv6k). Hard-float VFP11.
 ARCH     := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
-COMMON   := -g -O2 -Wall -mword-relocations -ffunction-sections -fdata-sections $(ARCH) -D__3DS__ $(INCLUDE)
+COMMON   := -MMD -MP -g -O2 -Wall -mword-relocations -ffunction-sections -fdata-sections $(ARCH) -D__3DS__ $(INCLUDE)
 CFLAGS   := $(COMMON) -std=gnu11
 CXXFLAGS := $(COMMON) -std=gnu++14 -Wno-unknown-pragmas -Wno-register -Wno-narrowing -D__fabs=__builtin_fabs \
 	-DVERSION=$(GAME_VERSION_NUM) -DRMGJ01=0 -DRMGE01=1 -DRMGP01=2 -DRMGK01=3 -DNDEBUG=1 -DREVOLUTION
@@ -52,7 +52,7 @@ LIBS     := -L$(CTRULIB)/lib -lcitro3d -lctru -lm
 OBJS := $(patsubst %.cpp,$(BUILD)/%.o,$(subst ../,up/,$(SRCS)) $(LOCAL_SRCS)) $(BUILD)/vshader_shbin.o
 
 # main.cpp must NOT see the Petari/MSL headers (they shadow devkitARM libc headers and break <3ds.h>).
-PLAIN_CXXFLAGS := -g -O2 -Wall $(ARCH) -mword-relocations -ffunction-sections -fdata-sections -D__3DS__ -I$(CTRULIB)/include -std=gnu++14
+PLAIN_CXXFLAGS := -MMD -MP -g -O2 -Wall $(ARCH) -mword-relocations -ffunction-sections -fdata-sections -D__3DS__ -I$(CTRULIB)/include -std=gnu++14
 $(BUILD)/source/main.o $(BUILD)/source/sdfs.o $(BUILD)/source/yaz0.o $(BUILD)/source/rarc.o $(BUILD)/source/j3d.o $(BUILD)/source/soft3d.o $(BUILD)/source/gpuview.o: CXXFLAGS := $(PLAIN_CXXFLAGS)
 
 all: $(TARGET).3dsx
@@ -78,5 +78,8 @@ $(TARGET).elf: $(OBJS)
 
 clean:
 	rm -rf $(BUILD) $(TARGET).elf $(TARGET).3dsx
+
+# header dependency files written by -MMD, so changing a header rebuilds what includes it
+-include $(OBJS:.o=.d)
 
 .PHONY: all clean
