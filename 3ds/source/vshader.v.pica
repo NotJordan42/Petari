@@ -1,0 +1,46 @@
+; Vertex shader for the model viewer: transforms the position and does simple two-sided lighting.
+; Attributes: v0 = position (xyz), v1 = normal (xyz, model space). Uniforms: projection, modelview.
+
+.fvec projection[4]
+.fvec modelview[4]
+
+.constf k(0.25, 0.75, 1.0, 0.0)
+.constf light(0.3522, 0.5535, 0.7547, 0.0)
+.constf base(0.59, 0.75, 1.0, 1.0)
+
+.out outpos position
+.out outclr color
+
+.in inpos v0
+.in innrm v1
+
+.proc main
+	; position
+	mov r0.xyz, inpos
+	mov r0.w, k.zzzz
+	dp4 r1.x, modelview[0], r0
+	dp4 r1.y, modelview[1], r0
+	dp4 r1.z, modelview[2], r0
+	mov r1.w, k.zzzz
+	dp4 outpos.x, projection[0], r1
+	dp4 outpos.y, projection[1], r1
+	dp4 outpos.z, projection[2], r1
+	dp4 outpos.w, projection[3], r1
+
+	; normal into view space (modelview is rotation + translation only)
+	mov r2.xyz, innrm
+	mov r2.w, k.wwww
+	dp3 r3.x, modelview[0], r2
+	dp3 r3.y, modelview[1], r2
+	dp3 r3.z, modelview[2], r2
+
+	; two-sided diffuse: |n.l| * 0.75 + 0.25
+	dp3 r4, light, r3
+	mov r5, -r4
+	max r4, r4, r5
+	mul r4, r4, k.yyyy
+	add r4, r4, k.xxxx
+	mul outclr, r4, base
+
+	end
+.end

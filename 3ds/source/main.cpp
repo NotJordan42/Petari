@@ -7,6 +7,7 @@
 
 #include "j3d.h"
 #include "soft3d.h"
+#include "gpuview.h"
 #include "rarc.h"
 #include "sdfs.h"
 #include "yaz0.h"
@@ -226,7 +227,7 @@ static void modelTest(int dir) {
         free(arc);
         if (shown) {
             printf("\n#%d of %d  [</>] other\n", idx + 1, total);
-            printf(g_haveMesh ? "[X] view in 3D  [A] next page\n" : "(no drawable mesh)  [A] next page\n");
+            printf(g_haveMesh ? "[X] view 3D  [Y] GPU view  [A] next\n" : "(no drawable mesh)  [A] next page\n");
             return;
         }
     }
@@ -308,6 +309,18 @@ int main() {
             gfxFlushBuffers();
             gfxSwapBuffers();
             gspWaitForVBlank();
+            continue;
+        }
+        if ((down & KEY_Y) && page == 2 && g_haveMesh) {
+            const char* err = gpuview_run(g_mesh);
+            consoleInit(GFX_TOP, &top);  // citro3d took over the top screen; bring the text console back
+            consoleSelect(&top);
+            printTop();
+            if (err) {
+                consoleSelect(&bottom);
+                printf("\nGPU view failed: %s\n", err);
+                consoleSelect(&top);
+            }
             continue;
         }
         if ((down & KEY_X) && page == 2 && g_haveMesh && sfOk) {

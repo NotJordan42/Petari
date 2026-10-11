@@ -26,7 +26,7 @@ SRCS := \
 	$(ROOT)/src/JSystem/JMath/JMATrigonometric.cpp \
 	$(ROOT)/src/JSystem/JMath/random.cpp
 
-LOCAL_SRCS := source/main.cpp source/sdfs.cpp source/yaz0.cpp source/rarc.cpp source/j3d.cpp source/soft3d.cpp source/petari_test.cpp source/rvl_stubs.cpp
+LOCAL_SRCS := source/main.cpp source/sdfs.cpp source/yaz0.cpp source/rarc.cpp source/j3d.cpp source/soft3d.cpp source/gpuview.cpp source/petari_test.cpp source/rvl_stubs.cpp
 
 INCLUDE := \
 	-I$(CTRULIB)/include \
@@ -49,11 +49,11 @@ CXXFLAGS := $(COMMON) -std=gnu++14 -Wno-unknown-pragmas -Wno-register -Wno-narro
 LDFLAGS  := -specs=3dsx.specs -g $(ARCH) -Wl,--gc-sections
 LIBS     := -L$(CTRULIB)/lib -lcitro3d -lctru -lm
 
-OBJS := $(patsubst %.cpp,$(BUILD)/%.o,$(subst ../,up/,$(SRCS)) $(LOCAL_SRCS))
+OBJS := $(patsubst %.cpp,$(BUILD)/%.o,$(subst ../,up/,$(SRCS)) $(LOCAL_SRCS)) $(BUILD)/vshader_shbin.o
 
 # main.cpp must NOT see the Petari/MSL headers (they shadow devkitARM libc headers and break <3ds.h>).
 PLAIN_CXXFLAGS := -g -O2 -Wall $(ARCH) -mword-relocations -ffunction-sections -fdata-sections -D__3DS__ -I$(CTRULIB)/include -std=gnu++14
-$(BUILD)/source/main.o $(BUILD)/source/sdfs.o $(BUILD)/source/yaz0.o $(BUILD)/source/rarc.o $(BUILD)/source/j3d.o $(BUILD)/source/soft3d.o: CXXFLAGS := $(PLAIN_CXXFLAGS)
+$(BUILD)/source/main.o $(BUILD)/source/sdfs.o $(BUILD)/source/yaz0.o $(BUILD)/source/rarc.o $(BUILD)/source/j3d.o $(BUILD)/source/soft3d.o $(BUILD)/source/gpuview.o: CXXFLAGS := $(PLAIN_CXXFLAGS)
 
 all: $(TARGET).3dsx
 
@@ -64,6 +64,14 @@ $(BUILD)/up/%.o: $(ROOT)/%.cpp
 $(BUILD)/%.o: %.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# Vertex shader: picasso -> .shbin -> object file exposing vshader_shbin / vshader_shbin_size
+$(BUILD)/vshader.shbin: source/vshader.v.pica
+	@mkdir -p $(BUILD)
+	picasso -o $@ $<
+
+$(BUILD)/vshader_shbin.o: $(BUILD)/vshader.shbin
+	cd $(BUILD) && bin2s vshader.shbin | $(AS) -o vshader_shbin.o
 
 $(TARGET).elf: $(OBJS)
 	$(CXX) $(LDFLAGS) $(OBJS) $(LIBS) -o $@
