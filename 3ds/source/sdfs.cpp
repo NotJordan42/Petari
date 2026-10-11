@@ -2,6 +2,7 @@
 
 #include <dirent.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -78,4 +79,29 @@ bool sdfs_read_head(const char* rel, uint8_t* buf, size_t n) {
     size_t got = fread(buf, 1, n, f);
     fclose(f);
     return got == n;
+}
+
+uint8_t* sdfs_read_all(const char* rel, size_t* outSize) {
+    char path[320];
+    joinPath(path, sizeof(path), kRoot, rel);
+    FILE* f = fopen(path, "rb");
+    if (!f) {
+        return nullptr;
+    }
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (len <= 0 || len > 16 * 1024 * 1024) {
+        fclose(f);
+        return nullptr;
+    }
+    uint8_t* buf = (uint8_t*)malloc((size_t)len);
+    if (!buf || fread(buf, 1, (size_t)len, f) != (size_t)len) {
+        free(buf);
+        fclose(f);
+        return nullptr;
+    }
+    fclose(f);
+    *outSize = (size_t)len;
+    return buf;
 }

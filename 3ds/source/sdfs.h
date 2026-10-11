@@ -13,6 +13,9 @@ bool sdfs_find_first_file(const char* relDir, char* outRel, size_t outN, long* o
 // Reads the first n bytes of a game file (path relative to the game root). Returns false on failure.
 bool sdfs_read_head(const char* rel, uint8_t* buf, size_t n);
 
+// Reads a whole game file into a malloc'd buffer (caller free()s it). Returns nullptr on failure or if over 16 MB.
+uint8_t* sdfs_read_all(const char* rel, size_t* outSize);
+
 // The game's data is big-endian (Wii/PowerPC); the 3DS CPU is little-endian. Always read multi-byte fields with these.
 inline uint32_t sdfs_be32(const uint8_t* p) {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];

@@ -2,8 +2,11 @@
 // Only <3ds.h>/<stdio.h> here; all Petari code lives in petari_test.cpp (see the note there).
 #include <3ds.h>
 #include <stdio.h>
+#include <stdlib.h>
 
+#include "rarc.h"
 #include "sdfs.h"
+#include "yaz0.h"
 
 extern "C" int petari_run_tests(float* out);
 
@@ -52,6 +55,75 @@ static void sdTest() {
     } else {
         printf("\nNo file found in StageData\n");
     }
+    printf("\n[A] open the archive\n");
+}
+
+// Bottom screen page 2: decompress that first StageData archive and list what is inside it.
+static void archiveTest() {
+    char rel[256];
+    long fileSize = 0;
+    printf("Archive test\n\n");
+    if (!sdfs_find_first_file("StageData", rel, sizeof(rel), &fileSize)) {
+        printf("No StageData file found\n\n[A] back\n");
+        return;
+    }
+    printf("%.38s\n", rel);
+
+    size_t rawSize = 0;
+    uint8_t* raw = sdfs_read_all(rel, &rawSize);
+    if (!raw) {
+        printf("Could not read the file\n\n[A] back\n");
+        return;
+    }
+
+    uint8_t* arc = raw;
+    size_t arcSize = rawSize;
+    uint32_t unpacked = yaz0_size(raw, rawSize);
+    if (unpacked) {
+        arc = (uint8_t*)malloc(unpacked);
+        if (!arc || !yaz0_decode(raw, rawSize, arc, unpacked)) {
+            printf("Yaz0 decode FAILED\n\n[A] back\n");
+            free(arc);
+            free(raw);
+            return;
+        }
+        arcSize = unpacked;
+        printf("Yaz0: %lu -> %lu bytes\n", (unsigned long)rawSize, (unsigned long)unpacked);
+    } else {
+        printf("Not Yaz0 (%lu bytes)\n", (unsigned long)rawSize);
+    }
+
+    Rarc r;
+    if (rarc_open(&r, arc, arcSize)) {
+        int files = 0;
+        for (uint32_t i = 0; i < r.nodeCount; i++) {
+            RarcNode n;
+            if (rarc_node(r, i, &n) && !n.isDir) {
+                files++;
+            }
+        }
+        printf("RARC ok: %d files, %lu nodes\n\n", files, (unsigned long)r.nodeCount);
+        int shown = 0;
+        for (uint32_t i = 0; i < r.nodeCount && shown < 14; i++) {
+            RarcNode n;
+            if (rarc_node(r, i, &n) && !n.isDir) {
+                printf("%-26.26s %7lu\n", n.name, (unsigned long)n.dataSize);
+                shown++;
+            }
+        }
+        if (files > shown) {
+            printf("... and %d more\n", files - shown);
+        }
+    } else {
+        printf("RARC header check FAILED\n");
+        printf("first bytes: %02X %02X %02X %02X\n", arc[0], arc[1], arc[2], arc[3]);
+    }
+    printf("\n[A] back\n");
+
+    if (arc != raw) {
+        free(arc);
+    }
+    free(raw);
 }
 
 int main() {
@@ -77,10 +149,23 @@ int main() {
 
     printf("\nPress START to exit.\n");
 
+    int page = 0;
     while (aptMainLoop()) {
         hidScanInput();
-        if (hidKeysDown() & KEY_START) {
+        u32 down = hidKeysDown();
+        if (down & KEY_START) {
             break;
+        }
+        if (down & KEY_A) {
+            page ^= 1;
+            consoleSelect(&bottom);
+            consoleClear();
+            if (page) {
+                archiveTest();
+            } else {
+                sdTest();
+            }
+            consoleSelect(&top);
         }
         gfxFlushBuffers();
         gfxSwapBuffers();
